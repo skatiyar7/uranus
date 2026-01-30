@@ -153,18 +153,18 @@ checkout [moshi/README.md](moshi/README.md).
 
 Once you have installed `moshi_mlx`, you can run
 ```bash
-python -m moshi_mlx.local -q 4   # weights quantized to 4 bits
-python -m moshi_mlx.local -q 8   # weights quantized to 8 bits
+moshi-local -q 4   # weights quantized to 4 bits
+moshi-local -q 8   # weights quantized to 8 bits
 # And using a different pretrained model:
-python -m moshi_mlx.local -q 4 --hf-repo kyutai/moshika-mlx-q4
-python -m moshi_mlx.local -q 8 --hf-repo kyutai/moshika-mlx-q8
+moshi-local -q 4 --hf-repo kyutai/moshika-mlx-q4
+moshi-local -q 8 --hf-repo kyutai/moshika-mlx-q8
 # be careful to always match the `-q` and `--hf-repo` flag.
 ```
 
 This command line interface is also barebone. It does not perform any echo cancellation,
 nor does it try to compensate for a growing lag by skipping frames.
 
-Alternatively you can run `python -m moshi_mlx.local_web` to use
+Alternatively you can run `moshi-local-web` to use
 the web UI, the connection is via http and will be at [localhost:8998](http://localhost:8998).
 
 

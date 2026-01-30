@@ -27,11 +27,11 @@ If you are not using Python 3.12, you might get an error when installing
 
 Once you have installed `moshi_mlx`, you can run
 ```bash
-python -m moshi_mlx.local -q 4   # weights quantized to 4 bits
-python -m moshi_mlx.local -q 8   # weights quantized to 8 bits
+moshi-local -q 4   # weights quantized to 4 bits
+moshi-local -q 8   # weights quantized to 8 bits
 # And using a different pretrained model:
-python -m moshi_mlx.local -q 4 --hf-repo kyutai/moshika-mlx-q4
-python -m moshi_mlx.local -q 8 --hf-repo kyutai/moshika-mlx-q8
+moshi-local -q 4 --hf-repo kyutai/moshika-mlx-q4
+moshi-local -q 8 --hf-repo kyutai/moshika-mlx-q8
 # be careful to always match the `-q` and `--hf-repo` flag.
 ```
 
@@ -41,7 +41,7 @@ nor does it try to compensate for a growing lag by skipping frames.
 You can use `--hf-repo` to select a different pretrained model, by setting the proper Hugging Face repository.
 See [the model list](https://github.com/kyutai-labs/moshi?tab=readme-ov-file#models) for a reference of the available models.
 
-Alternatively you can use `python -m moshi_mlx.local_web` to use
+Alternatively you can use `moshi-local-web` to use
 the web UI, the connection is via http, at [localhost:8998](http://localhost:8998).
 
 
