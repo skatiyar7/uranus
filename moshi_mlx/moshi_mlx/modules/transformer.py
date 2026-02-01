@@ -2,6 +2,33 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""
+Transformer Implementation
+==========================
+
+This module implements the transformer architecture used in Moshi and Mimi,
+including multi-head attention, feedforward networks, and layer normalization.
+
+Key Features:
+- Rotary Position Embeddings (RoPE) for position encoding
+- Key-Value caching for efficient autoregressive generation
+- Optional cross-attention for conditioning
+- Gated feedforward networks (SwiGLU-style)
+- Layer scaling for training stability
+- Support for both LayerNorm and RMSNorm
+
+Classes:
+--------
+- TransformerConfig: Configuration dataclass for transformer parameters
+- Attention: Multi-head self-attention with RoPE support
+- CrossAttention: Cross-attention for conditioning on external inputs
+- MlpGating: Gated feedforward network (SwiGLU)
+- MlpNoGating: Standard feedforward network with GELU
+- TransformerLayer: Single transformer layer combining attention and FFN
+- Transformer: Stack of transformer layers
+- ProjectedTransformer: Transformer with input/output projections
+"""
+
 from dataclasses import dataclass
 
 from .kv_cache import KVCache, RotatingKVCache
@@ -12,6 +39,32 @@ import mlx.nn as nn
 
 @dataclass
 class TransformerConfig:
+    """
+    Configuration for transformer architecture.
+    
+    Attributes:
+        d_model: Model dimension (embedding size)
+        num_heads: Number of attention heads
+        num_layers: Number of transformer layers
+        causal: Whether to use causal (autoregressive) attention
+        norm_first: Whether to apply normalization before attention (pre-norm)
+        bias_ff: Whether to use bias in feedforward layers
+        bias_attn: Whether to use bias in attention layers
+        layer_scale: Initial value for layer scaling (None to disable)
+        positional_embedding: Type of position encoding ("rope" or "none")
+        use_conv_block: Whether to use convolutional blocks
+        cross_attention: Whether to include cross-attention layers
+        conv_kernel_size: Kernel size for convolutional blocks
+        use_conv_bias: Whether to use bias in convolutions
+        gating: Whether to use gated feedforward (SwiGLU)
+        norm: Normalization type ("layer_norm" or "rms_norm")
+        context: Context window size for attention
+        max_period: Maximum period for RoPE
+        max_seq_len: Maximum sequence length
+        kv_repeat: Key-value repeat factor for grouped query attention
+        dim_feedforward: Feedforward hidden dimension
+        conv_layout: Whether to use NCL layout for convolutions
+    """
     d_model: int
     num_heads: int
     num_layers: int
@@ -36,10 +89,13 @@ class TransformerConfig:
 
     @property
     def head_dim(self) -> int:
+        """Dimension of each attention head."""
         return self.d_model // self.num_heads
 
 
 class Id(nn.Module):
+    """Identity module that returns input unchanged."""
+
     def __init__(self):
         super().__init__()
 
@@ -48,9 +104,18 @@ class Id(nn.Module):
 
 
 class LayerScale(nn.Module):
+    """
+    Learnable per-channel scaling for layer outputs.
+    
+    Layer scaling helps with training stability by allowing the model
+    to learn to downweight certain layers during training.
+    
+    Args:
+        dim: Number of channels to scale
+    """
+
     def __init__(self, dim: int):
         super().__init__()
-
         self.scale = mx.ones(dim)
 
     def __call__(self, xs: mx.array) -> mx.array:
@@ -59,15 +124,36 @@ class LayerScale(nn.Module):
 
 @dataclass
 class LayerCache:
+    """
+    Cache for a single transformer layer during autoregressive generation.
+    
+    Stores key-value pairs for self-attention and optionally for cross-attention
+    to avoid recomputing them at each generation step.
+    
+    Attributes:
+        self_attn: KV cache for self-attention
+        cross_attn: Cached key-value pairs for cross-attention (computed once)
+    """
     self_attn: KVCache | RotatingKVCache
     cross_attn: tuple[mx.array, mx.array] | None = None
 
     def reset(self):
+        """Reset the cache for a new sequence."""
         self.self_attn.reset()
         self.cross_attn = None
 
 
 class CrossAttention(nn.Module):
+    """
+    Cross-attention module for conditioning on external inputs.
+    
+    Used for conditioning the model on external information like
+    speaker embeddings or other conditioning signals.
+    
+    Args:
+        cfg: TransformerConfig with attention parameters
+    """
+
     def __init__(self, cfg: TransformerConfig):
         super().__init__()
 
@@ -112,6 +198,18 @@ class CrossAttention(nn.Module):
 
 
 class Attention(nn.Module):
+    """
+    Multi-head self-attention with optional Rotary Position Embeddings.
+    
+    Implements scaled dot-product attention with support for:
+    - Rotary Position Embeddings (RoPE) for position encoding
+    - Key-value caching for efficient autoregressive generation
+    - Context window limiting for long sequences
+    
+    Args:
+        cfg: TransformerConfig with attention parameters
+    """
+
     def __init__(self, cfg: TransformerConfig):
         super().__init__()
 
@@ -158,6 +256,20 @@ class Attention(nn.Module):
 
 
 class MlpGating(nn.Module):
+    """
+    Gated feedforward network (SwiGLU-style).
+    
+    Uses a gating mechanism where the input is projected to 2x hidden dim,
+    split into two parts, one passed through SiLU activation and multiplied
+    with the other (gate), then projected back to model dimension.
+    
+    This architecture has been shown to improve model quality compared
+    to standard feedforward networks.
+    
+    Args:
+        cfg: TransformerConfig with feedforward parameters
+    """
+
     def __init__(self, cfg: TransformerConfig):
         super().__init__()
 
@@ -176,6 +288,16 @@ class MlpGating(nn.Module):
 
 
 class MlpNoGating(nn.Module):
+    """
+    Standard feedforward network with GELU activation.
+    
+    A simple two-layer feedforward network: Linear -> GELU -> Linear.
+    Used when gating is disabled in the configuration.
+    
+    Args:
+        cfg: TransformerConfig with feedforward parameters
+    """
+
     def __init__(self, cfg: TransformerConfig):
         super().__init__()
 
@@ -187,6 +309,20 @@ class MlpNoGating(nn.Module):
 
 
 class TransformerLayer(nn.Module):
+    """
+    Single transformer layer with self-attention and feedforward.
+    
+    Implements a standard transformer layer with:
+    - Pre-normalization (norm before attention/FFN)
+    - Self-attention with optional RoPE
+    - Optional cross-attention for conditioning
+    - Gated or standard feedforward network
+    - Optional layer scaling
+    
+    Args:
+        cfg: TransformerConfig with layer parameters
+    """
+
     def __init__(self, cfg: TransformerConfig):
         super().__init__()
 
@@ -253,6 +389,16 @@ class TransformerLayer(nn.Module):
 
 
 class Transformer(nn.Module):
+    """
+    Stack of transformer layers.
+    
+    The main transformer module that stacks multiple TransformerLayer
+    instances and manages their KV caches for autoregressive generation.
+    
+    Args:
+        cfg: TransformerConfig with transformer parameters
+    """
+
     def __init__(self, cfg: TransformerConfig):
         super().__init__()
 
@@ -291,6 +437,22 @@ class Transformer(nn.Module):
 
 
 class ProjectedTransformer(nn.Module):
+    """
+    Transformer with input and output projections.
+    
+    Wraps a Transformer with optional linear projections to handle
+    different input/output dimensions. Useful when the transformer
+    dimension differs from the input or output requirements.
+    
+    Also supports conv_layout mode where inputs are in NCL format
+    (batch, channels, length) instead of NLC (batch, length, channels).
+    
+    Args:
+        cfg: TransformerConfig with transformer parameters
+        input_dim: Dimension of input features
+        output_dims: List of output dimensions (one projection per output)
+    """
+
     def __init__(self, cfg: TransformerConfig, input_dim: int, output_dims: list[int]):
         super().__init__()
 

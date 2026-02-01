@@ -2,6 +2,43 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""
+Local Audio Inference for Moshi
+===============================
+
+This module implements a local command-line interface for real-time voice
+conversations with the Moshi model using the system's audio devices (microphone
+and speakers). Unlike the web-based interface, this module directly interfaces
+with the operating system's audio subsystem via sounddevice.
+
+Architecture Overview:
+---------------------
+The module uses a multi-process architecture similar to local_web.py:
+
+```
+Microphone --> Client Process --> Queue --> Server Process --> Queue --> Client Process --> Speakers
+                    |                            |
+              Audio Codec (Mimi)           Language Model
+              Encode/Decode                Token Generation
+```
+
+Key Components:
+- Server Process: Runs the language model inference
+- Client Process: Handles audio I/O via sounddevice and audio tokenization
+- Printer Queue: Handles formatted terminal output from both processes
+
+The module also generates a Chrome-compatible trace file (mlx-trace.json) for
+performance profiling and debugging.
+
+Usage:
+------
+    python -m moshi_mlx.local --hf-repo kyutai/moshiko-mlx-q8
+
+Requirements:
+- A working microphone and speakers
+- sounddevice library with proper audio backend
+"""
+
 import argparse
 import asyncio
 import json
@@ -24,23 +61,65 @@ from moshi_mlx import models, utils
 
 import huggingface_hub
 
-SAMPLE_RATE = 24000
-CHANNELS = 1
+# Audio configuration constants
+SAMPLE_RATE = 24000  # 24kHz sample rate for high-quality speech
+CHANNELS = 1         # Mono audio
 
 
 def hf_hub_download(repo, path: str) -> str:
+    """
+    Download a file from a HuggingFace Hub repository.
+    
+    Args:
+        repo: The HuggingFace repository ID (e.g., "kyutai/moshiko-mlx-q8")
+        path: The path to the file within the repository
+    
+    Returns:
+        Local path to the downloaded file
+    
+    Raises:
+        ValueError: If repo is None or empty
+    """
     if repo is None or repo == "":
         raise ValueError(f"the --hf-repo flag is required to retrieve {path}")
     return huggingface_hub.hf_hub_download(repo, path)
 
 
 class Stats:
+    """
+    Container for timing statistics during inference.
+    
+    Used for performance profiling and debugging latency issues
+    in the audio processing pipeline.
+    
+    Attributes:
+        send_times: Timestamps when audio was sent to the model
+        model_times: Tuples of (start, end) times for model inference
+        recv_times: Timestamps when audio was received from the model
+    """
     send_times: tp.List[float] = []
     model_times: tp.List[tp.Tuple[float, float]] = []
     recv_times: tp.List[float] = []
 
 
 class PrinterType(Enum):
+    """
+    Enumeration of message types for the inter-process printer queue.
+    
+    Used to communicate different types of events from worker processes
+    to the main process for display and logging.
+    
+    Values:
+        TOKEN: A text token to display
+        PENDING: Show the pending/processing indicator
+        INFO: An informational log message
+        WARNING: A warning log message
+        ERROR: An error log message
+        LAG: Audio processing is falling behind real-time
+        HEADER: Print the output header
+        EVENT: A timing event for profiling (used in trace generation)
+        QSIZE: Queue size update for monitoring buffer health
+    """
     TOKEN = 1
     PENDING = 2
     INFO = 3
@@ -53,6 +132,17 @@ class PrinterType(Enum):
 
 
 def full_warmup(audio_tokenizer, client_to_server, server_to_client):
+    """
+    Perform a full warmup of the audio tokenizer and model pipeline.
+    
+    Sends silent audio frames through the entire pipeline to initialize
+    all components and fill delay buffers before real-time processing begins.
+    
+    Args:
+        audio_tokenizer: The Mimi audio tokenizer instance
+        client_to_server: Queue for sending audio tokens to the model
+        server_to_client: Queue for receiving audio tokens from the model
+    """
     for i in range(4):
         pcm_data = np.array([0.0] * 1920).astype(np.float32)
         audio_tokenizer.encode(pcm_data)
@@ -74,6 +164,26 @@ def full_warmup(audio_tokenizer, client_to_server, server_to_client):
 
 
 def server(printer_q, client_to_server, server_to_client, args):
+    """
+    Model server process that runs the language model inference.
+    
+    This function runs in a separate process and handles:
+    1. Loading the language model and text tokenizer
+    2. Applying quantization if requested
+    3. Running the main inference loop
+    
+    The inference loop continuously:
+    - Receives audio tokens from the client via the input queue
+    - Runs the model to generate text and audio tokens
+    - Sends the generated tokens back via the output queue
+    - Sends display messages to the printer queue
+    
+    Args:
+        printer_q: Queue for sending display messages to the main process
+        client_to_server: Queue receiving audio tokens from the client
+        server_to_client: Queue sending generated tokens to the client
+        args: Command-line arguments with model paths and settings
+    """
     model_file = args.moshi_weight
     tokenizer_file = args.tokenizer
     if model_file is None:
@@ -145,6 +255,31 @@ def server(printer_q, client_to_server, server_to_client, args):
 
 
 def client(printer_q, client_to_server, server_to_client, args):
+    """
+    Client process that handles audio I/O and tokenization.
+    
+    This function runs in a separate process and manages:
+    1. Loading and initializing the Mimi audio codec
+    2. Setting up audio input/output streams via sounddevice
+    3. Encoding microphone audio to neural codec tokens
+    4. Decoding model-generated tokens to speaker audio
+    
+    The client runs multiple async tasks concurrently:
+    - send_loop: Encodes PCM audio from microphone to tokens
+    - send_loop2: Forwards encoded tokens to the model server
+    - recv_loop: Retrieves decoded PCM for speaker output
+    - recv_loop2: Receives tokens from the model server
+    
+    Audio callbacks handle real-time streaming:
+    - on_input: Called when microphone data is available
+    - on_output: Called when speaker needs audio data
+    
+    Args:
+        printer_q: Queue for sending display messages to the main process
+        client_to_server: Queue for sending audio tokens to the model
+        server_to_client: Queue for receiving tokens from the model
+        args: Command-line arguments with codec paths and settings
+    """
     mimi_file = args.mimi_weight
     if mimi_file is None:
         mimi_file = hf_hub_download(
@@ -245,6 +380,31 @@ def client(printer_q, client_to_server, server_to_client, args):
 
 
 def main():
+    """
+    Main entry point for the local audio-based Moshi inference.
+    
+    Parses command-line arguments, initializes the multi-process architecture,
+    manages the printer queue for terminal output, and handles graceful shutdown.
+    
+    The function:
+    1. Parses CLI arguments for model configuration
+    2. Sets up inter-process communication queues
+    3. Selects appropriate printer (TTY vs raw)
+    4. Spawns client and server processes
+    5. Processes printer queue messages in the main loop
+    6. Generates a Chrome-compatible trace file on exit
+    
+    Command-line Arguments:
+        --tokenizer: Path to the SentencePiece tokenizer file
+        --moshi-weight: Path to the Moshi model weights
+        --mimi-weight: Path to the Mimi codec weights
+        -q/--quantized: Quantization level (4 or 8 bits)
+        --steps: Maximum generation steps (default: 4000)
+        --hf-repo: HuggingFace repository for model files
+    
+    Output:
+        Generates mlx-trace.json for Chrome DevTools performance analysis
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--tokenizer", type=str)
     parser.add_argument("--moshi-weight", type=str)

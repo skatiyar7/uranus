@@ -2,12 +2,56 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""
+1D Convolution Modules
+======================
+
+This module implements various 1D convolution layers for audio processing,
+including standard convolutions, transposed convolutions, and streaming-capable
+variants that maintain state for real-time processing.
+
+Key Classes:
+-----------
+- Conv1d: Basic 1D convolution with MLX-compatible weight layout
+- ConvTranspose1d: Transposed 1D convolution for upsampling
+- StreamableConv1d: Streaming convolution that maintains state
+- StreamableConvTranspose1d: Streaming transposed convolution
+- NormConv1d: Convolution with optional normalization
+- ConvDownsample1d: Strided convolution for downsampling
+- ConvTrUpsample1d: Transposed convolution for upsampling
+
+The streaming variants are essential for real-time audio processing,
+allowing the model to process audio in chunks while maintaining
+proper state across chunk boundaries.
+
+Note: MLX uses NLC (batch, length, channels) layout for convolutions,
+while PyTorch uses NCL (batch, channels, length). The modules handle
+the necessary transpositions internally.
+"""
+
 import math
 import mlx.core as mx
 import mlx.nn as nn
 
 
 class Conv1d(nn.Module):
+    """
+    1D Convolution layer compatible with MLX.
+    
+    Wraps MLX's conv1d operation with proper weight initialization
+    and handles the layout conversion (NCL input -> NLC for MLX -> NCL output).
+    
+    Args:
+        in_channels: Number of input channels
+        out_channels: Number of output channels
+        ksize: Kernel size
+        stride: Stride for the convolution
+        padding: Padding to apply
+        groups: Number of groups for grouped convolution
+        dilation: Dilation factor
+        bias: Whether to include a bias term
+    """
+
     def __init__(
         self,
         in_channels: int,
@@ -51,6 +95,23 @@ class Conv1d(nn.Module):
 
 
 class ConvTranspose1d(nn.Module):
+    """
+    Transposed 1D Convolution (deconvolution) for upsampling.
+    
+    Used in decoder networks to increase the temporal resolution
+    of feature maps. Handles the weight layout differences between
+    PyTorch and MLX.
+    
+    Args:
+        in_channels: Number of input channels
+        out_channels: Number of output channels
+        ksize: Kernel size
+        stride: Stride (determines upsampling factor)
+        padding: Padding to apply
+        groups: Number of groups for grouped convolution
+        bias: Whether to include a bias term
+    """
+
     def __init__(
         self,
         in_channels: int,
@@ -205,6 +266,28 @@ def unpad1d(xs: mx.array, unpad_l: int, unpad_r: int) -> mx.array:
 
 
 class StreamableConv1d(nn.Module):
+    """
+    Streaming-capable 1D convolution that maintains state across chunks.
+    
+    This convolution can process audio in chunks while maintaining proper
+    state for causal processing. It handles padding and buffering internally
+    to ensure correct output at chunk boundaries.
+    
+    The streaming mode (step method) is essential for real-time audio
+    processing where audio arrives in small chunks.
+    
+    Args:
+        in_channels: Number of input channels
+        out_channels: Number of output channels
+        ksize: Kernel size
+        stride: Stride for the convolution
+        dilation: Dilation factor
+        groups: Number of groups
+        bias: Whether to include bias
+        causal: Whether to use causal (left-only) padding
+        pad_mode: Padding mode ("constant", "edge", etc.)
+    """
+
     def __init__(
         self,
         in_channels: int,

@@ -2,6 +2,36 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""
+SEANet Encoder and Decoder
+==========================
+
+This module implements the SEANet (Sound Enhancement and Analysis Network)
+architecture used in the Mimi audio codec. SEANet is a convolutional
+encoder-decoder network designed for high-quality audio compression.
+
+Architecture Overview:
+---------------------
+The encoder progressively downsamples audio using strided convolutions
+with residual blocks at each scale. The decoder mirrors this structure,
+using transposed convolutions to upsample back to the original resolution.
+
+Key Features:
+- Multi-scale processing with configurable downsampling ratios
+- Residual blocks with dilated convolutions for large receptive fields
+- Streaming support for real-time processing
+- Causal mode for autoregressive applications
+
+Classes:
+--------
+- SeanetConfig: Configuration dataclass for SEANet parameters
+- SeanetResnetBlock: Residual block with dilated convolutions
+- EncoderLayer: Single encoder layer with residuals and downsampling
+- DecoderLayer: Single decoder layer with upsampling and residuals
+- SeanetEncoder: Full encoder network
+- SeanetDecoder: Full decoder network
+"""
+
 from dataclasses import dataclass
 from .conv import StreamableConv1d, StreamableConvTranspose1d
 
@@ -11,6 +41,24 @@ import mlx.nn as nn
 
 @dataclass
 class SeanetConfig:
+    """
+    Configuration for SEANet encoder/decoder.
+    
+    Attributes:
+        dimension: Latent dimension (output of encoder)
+        channels: Number of audio channels (1 for mono)
+        causal: Whether to use causal convolutions
+        nfilters: Base number of filters (doubled at each scale)
+        nresidual_layers: Number of residual blocks per scale
+        ratios: Downsampling ratios at each scale (e.g., [8, 6, 5, 4])
+        ksize: Kernel size for main convolutions
+        residual_ksize: Kernel size for residual block convolutions
+        last_ksize: Kernel size for final convolution
+        dilation_base: Base for exponential dilation in residual blocks
+        pad_mode: Padding mode for convolutions
+        true_skip: Whether to use true skip connections (vs 1x1 conv)
+        compress: Compression factor for residual block hidden dim
+    """
     dimension: int
     channels: int
     causal: bool
@@ -27,6 +75,14 @@ class SeanetConfig:
 
 
 class StreamingAdd(nn.Module):
+    """
+    Streaming-capable element-wise addition.
+    
+    Handles the case where two streams may have different lengths
+    due to buffering in streaming convolutions. Buffers the longer
+    stream until the shorter one catches up.
+    """
+
     def __init__(self):
         super().__init__()
         self._lhs = None

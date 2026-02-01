@@ -3,7 +3,33 @@
 # LICENSE file in the root directory of this source tree.
 # flake8: noqa
 """
-Conditioners
+Conditioning Modules
+====================
+
+This module implements conditioning mechanisms for the Moshi language model,
+allowing the model to be conditioned on various inputs like quality settings,
+speaker embeddings, or other control signals.
+
+Conditioning Types:
+------------------
+1. Text/Lookup Conditioning (LutConditioner): Uses a lookup table to map
+   discrete values (like "very_good", "good", "bad") to embedding vectors.
+   Useful for quality control or categorical conditioning.
+
+2. Tensor Conditioning (TensorConditioner): Uses continuous tensor inputs
+   (like speaker embeddings) with cross-attention. Useful for speaker
+   conditioning or other continuous control signals.
+
+Key Classes:
+-----------
+- ConditionAttributes: Container for all conditioning inputs
+- ConditionTensor: Wrapper for computed condition embeddings
+- ConditionProvider: Manages multiple conditioners and computes embeddings
+- LutConditioner: Lookup table based conditioning
+- TensorConditioner: Tensor-based conditioning with projection
+
+The conditioning system is designed to be flexible, allowing multiple
+conditioning sources to be combined and applied to the model.
 """
 
 from dataclasses import dataclass, field
@@ -15,8 +41,15 @@ import mlx.nn as nn
 
 @dataclass(frozen=True)
 class TensorCondition:
-    """Looks quite similar to ConditionType, but represents the input to TensorConditioners.
-    `tensor` should be [B | 1, T, D], and `mask` should be `[B | 1, T]`.
+    """
+    Container for tensor-based conditioning input.
+    
+    Holds a tensor and its associated mask, where the mask indicates
+    which positions contain valid data (useful for variable-length inputs).
+    
+    Attributes:
+        tensor: Conditioning tensor [B, T, D]
+        mask: Binary mask [B, T] indicating valid positions
     """
 
     tensor: mx.array
@@ -24,12 +57,14 @@ class TensorCondition:
 
     @staticmethod
     def from_tensor(tensor: mx.array):
+        """Create a TensorCondition with all-ones mask."""
         B, T, _ = tensor.shape
         mask = mx.ones((B, T), dtype=mx.uint8)
         return TensorCondition(tensor, mask)
 
     @staticmethod
     def cat(conditions: tp.Sequence["TensorCondition"]) -> "TensorCondition":
+        """Concatenate multiple TensorConditions along batch dimension."""
         assert conditions, "Cannot cat empty list."
         ref_tensor = conditions[0].tensor
         B, _, D = ref_tensor.shape
@@ -46,12 +81,16 @@ class TensorCondition:
 
 @dataclass
 class ConditionAttributes:
-    """Standard class for representing the set of potential inputs to the conditioners.
-    Typically, `audiocraft.data.audio_dataset.SegmentInfo` will convert
-    to this class to make conditioning agnostic to the type of dataset.
-
-    There are two kinds of conditionings: text (or None), or raw mlx tensors (with a mask).
-
+    """
+    Container for all conditioning inputs to the model.
+    
+    Holds both text-based (lookup) and tensor-based conditioning inputs.
+    This is the standard interface for passing conditioning information
+    through the model.
+    
+    Attributes:
+        text: Dictionary mapping conditioner names to text values
+        tensor: Dictionary mapping conditioner names to TensorConditions
     """
 
     text: tp.Dict[str, tp.Optional[str]] = field(default_factory=dict)
@@ -59,17 +98,21 @@ class ConditionAttributes:
 
     @property
     def text_attributes(self) -> tp.Iterable[str]:
+        """Names of text-based conditioning attributes."""
         return self.text.keys()
 
     @property
     def tensor_attributes(self) -> tp.Iterable[str]:
+        """Names of tensor-based conditioning attributes."""
         return self.text.keys()
 
     @staticmethod
     def condition_types() -> tp.FrozenSet[str]:
+        """Valid condition type names."""
         return frozenset(["text", "tensor"])
 
     def copy(self) -> "ConditionAttributes":
+        """Create a shallow copy of the attributes."""
         return ConditionAttributes(dict(self.text), dict(self.tensor))
 
 

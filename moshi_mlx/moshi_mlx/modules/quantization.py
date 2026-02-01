@@ -2,6 +2,36 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""
+Vector Quantization Modules
+===========================
+
+This module implements vector quantization (VQ) components used in the
+Mimi audio codec for discretizing continuous audio representations.
+
+Vector quantization maps continuous vectors to discrete codebook entries,
+enabling efficient compression and discrete token-based modeling.
+
+Key Classes:
+-----------
+- EuclideanCodebook: Codebook with Euclidean distance for nearest neighbor lookup
+- VectorQuantization: Single-level vector quantizer
+- ResidualVectorQuantization: Multi-level residual VQ (RVQ)
+- ResidualVectorQuantizer: RVQ with input/output projections
+- SplitResidualVectorQuantizer: Split RVQ with separate first codebook
+
+Residual Vector Quantization (RVQ):
+----------------------------------
+RVQ uses multiple codebooks in sequence, where each codebook quantizes
+the residual (error) from the previous level. This allows for progressive
+refinement of the quantization, with earlier codebooks capturing coarse
+structure and later codebooks capturing fine details.
+
+The split variant separates the first codebook (which captures the most
+information) from the rest, allowing for different handling of the
+primary and residual quantization.
+"""
+
 from .conv import Conv1d
 
 import mlx.core as mx
@@ -9,6 +39,21 @@ import mlx.nn as nn
 
 
 class EuclideanCodebook(nn.Module):
+    """
+    Vector quantization codebook using Euclidean distance.
+    
+    Stores a set of codebook vectors and provides methods for encoding
+    (finding nearest neighbors) and decoding (looking up vectors).
+    
+    The codebook uses online clustering statistics (embedding_sum and
+    cluster_usage) that are updated during training. For inference,
+    these are used to compute the actual embedding vectors.
+    
+    Args:
+        dim: Dimension of codebook vectors
+        codebook_size: Number of entries in the codebook
+    """
+
     def __init__(self, dim: int, codebook_size: int):
         super().__init__()
         self._epsilon = 1e-5

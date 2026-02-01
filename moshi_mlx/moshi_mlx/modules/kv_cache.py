@@ -2,6 +2,29 @@
 # https://github.com/ml-explore/mlx-examples/blob/6c2369e4b97f49fb5906ec46033497b39931b25d/llms/mlx_lm/models/base.py#L1
 # Copyright © 2023-2024 Apple Inc.
 
+"""
+Key-Value Cache for Transformer Attention
+=========================================
+
+This module implements key-value caching mechanisms for efficient
+autoregressive generation in transformer models. During generation,
+the KV cache stores previously computed key and value tensors so they
+don't need to be recomputed at each step.
+
+Two cache implementations are provided:
+
+1. KVCache: Standard growing cache that expands as needed. Suitable for
+   sequences shorter than the maximum context length.
+
+2. RotatingKVCache: Fixed-size cache that rotates old entries out when
+   full. Suitable for very long sequences where memory is a concern.
+
+The caches are designed to work with MLX's lazy evaluation model,
+efficiently managing memory allocation and updates.
+
+Note: This code is adapted from Apple's MLX examples repository.
+"""
+
 import inspect
 from dataclasses import dataclass
 from typing import Any
@@ -10,6 +33,30 @@ import mlx.core as mx
 
 
 class KVCache:
+    """
+    Standard key-value cache for transformer attention.
+    
+    This cache grows dynamically as new key-value pairs are added,
+    allocating memory in chunks (step size) for efficiency.
+    
+    The cache stores keys and values in the format [B, num_heads, seq_len, head_dim]
+    and supports different dimensions for keys and values (useful for some
+    attention variants).
+    
+    Attributes:
+        n_kv_heads: Number of key-value heads
+        k_head_dim: Dimension of key vectors
+        v_head_dim: Dimension of value vectors
+        keys: Cached key tensor
+        values: Cached value tensor
+        offset: Current position in the cache
+        step: Allocation chunk size
+    
+    Example:
+        >>> cache = KVCache(head_dim=64, n_kv_heads=8)
+        >>> keys, values = cache.update_and_fetch(new_keys, new_values)
+    """
+
     def __init__(self, head_dim, n_kv_heads):
         self.n_kv_heads = n_kv_heads
         if isinstance(head_dim, int):
@@ -59,6 +106,30 @@ class KVCache:
 
 
 class RotatingKVCache:
+    """
+    Fixed-size rotating key-value cache for long sequences.
+    
+    Unlike KVCache which grows indefinitely, RotatingKVCache maintains
+    a fixed maximum size and rotates out old entries when full. This is
+    useful for very long sequences where memory is a concern.
+    
+    The cache can optionally "keep" a certain number of initial tokens
+    that are never rotated out (useful for system prompts or important
+    context).
+    
+    Attributes:
+        n_kv_heads: Number of key-value heads
+        k_head_dim: Dimension of key vectors
+        v_head_dim: Dimension of value vectors
+        keep: Number of initial tokens to never rotate out
+        max_size: Maximum cache size
+        step: Allocation chunk size
+    
+    Example:
+        >>> cache = RotatingKVCache(head_dim=64, n_kv_heads=8, max_size=2048)
+        >>> keys, values = cache.update_and_fetch(new_keys, new_values)
+    """
+
     def __init__(self, head_dim, n_kv_heads, max_size, keep=0, step=256):
         self.n_kv_heads = n_kv_heads
         if isinstance(head_dim, int):
@@ -159,8 +230,16 @@ class RotatingKVCache:
 
 @dataclass
 class BaseModelArgs:
+    """
+    Base class for model argument dataclasses.
+    
+    Provides a from_dict class method that filters dictionary keys
+    to only include those that match the dataclass fields.
+    """
+
     @classmethod
     def from_dict(cls, params):
+        """Create instance from dictionary, ignoring unknown keys."""
         return cls(
             **{
                 k: v
@@ -171,6 +250,20 @@ class BaseModelArgs:
 
 
 def create_additive_causal_mask(N: int, offset: int = 0):
+    """
+    Create an additive causal attention mask.
+    
+    Creates a mask where position i can only attend to positions <= i.
+    The mask uses large negative values (-1e9) for masked positions,
+    which become ~0 after softmax.
+    
+    Args:
+        N: Sequence length
+        offset: Offset for the mask (for cached sequences)
+    
+    Returns:
+        Causal mask of shape [N, offset + N]
+    """
     rinds = mx.arange(offset + N)
     linds = mx.arange(offset, offset + N) if offset else rinds
     mask = linds[:, None] < rinds[None]
@@ -178,6 +271,19 @@ def create_additive_causal_mask(N: int, offset: int = 0):
 
 
 def create_attention_mask(h: mx.array, cache: Any | None = None):
+    """
+    Create an attention mask for the given input.
+    
+    For sequences longer than 1 token (prefill), creates a causal mask.
+    For single tokens (generation), returns None (no mask needed with cache).
+    
+    Args:
+        h: Input tensor [B, T, D]
+        cache: Optional KV cache to determine offset
+    
+    Returns:
+        Attention mask or None
+    """
     T = h.shape[1]
     if T > 1:
         if cache is not None and cache[0] is not None:

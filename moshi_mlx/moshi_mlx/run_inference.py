@@ -2,6 +2,30 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""
+Offline Audio Inference for Moshi
+=================================
+
+This module provides a command-line interface for running Moshi inference
+on pre-recorded audio files. Unlike the real-time local.py and local_web.py
+modules, this processes audio files in batch mode without streaming.
+
+Use Cases:
+- Processing pre-recorded audio files
+- Batch transcription and response generation
+- Testing and debugging without real-time audio setup
+- Generating audio responses to audio prompts
+
+The module reads an input audio file, processes it through the Moshi model
+frame by frame, and optionally writes the generated audio response to an
+output file.
+
+Usage:
+------
+    python -m moshi_mlx.run_inference input.wav output.wav
+    python -m moshi_mlx.run_inference --hf-repo kyutai/moshiko-mlx-q8 input.wav
+"""
+
 import argparse
 import json
 import numpy as np
@@ -19,10 +43,29 @@ from . import models, utils
 
 
 def log(level: str, msg: str):
+    """
+    Print a formatted log message with colorized prefix.
+    
+    Args:
+        level: Log severity ("info", "warning", or "error")
+        msg: The message to log
+    """
     print(make_log(level, msg))
 
 
 def hf_get(filename: str) -> str:
+    """
+    Resolve a filename that may be a HuggingFace URL or local path.
+    
+    Supports the "hf://" URL scheme for downloading files from HuggingFace Hub.
+    Format: hf://owner/repo/path/to/file
+    
+    Args:
+        filename: Either a local path or an hf:// URL
+    
+    Returns:
+        Local path to the file (downloaded if necessary)
+    """
     if filename.startswith("hf://"):
         parts = filename[5:].split("/")
         repo_name = parts[0] + "/" + parts[1]
@@ -34,6 +77,33 @@ def hf_get(filename: str) -> str:
 
 
 def main():
+    """
+    Main entry point for offline audio inference.
+    
+    Processes an input audio file through the Moshi model and generates
+    both text transcription (printed to stdout) and audio response
+    (written to output file if specified).
+    
+    The processing pipeline:
+    1. Load model configuration and weights
+    2. Load and optionally pad the input audio
+    3. Initialize the audio tokenizer (Mimi)
+    4. Process audio frame by frame through the model
+    5. Decode generated audio tokens to PCM
+    6. Write output audio file
+    
+    Command-line Arguments:
+        --tokenizer: Path to the SentencePiece tokenizer file
+        --moshi-weights: Path to the Moshi model weights
+        --mimi-weights: Path to the Mimi codec weights
+        --hf-repo: HuggingFace repository for model files
+        --lm-config: Path to LM config JSON file
+        --verbose: Print detailed output
+        --cfg-coef: Classifier-free guidance coefficient (default: 1.0)
+        --temp: Sampling temperature (default: 0.8)
+        infile: Input audio file path
+        outfile: Output audio file path (optional)
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--tokenizer", type=str)
     parser.add_argument(

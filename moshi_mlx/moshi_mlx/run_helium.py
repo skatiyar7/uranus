@@ -2,6 +2,28 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""
+Helium Language Model Runner
+============================
+
+This module provides a command-line interface for running text generation
+with the Helium language model. Helium is a text-only language model (no audio)
+that can be used for general text generation tasks.
+
+Unlike Moshi which handles audio-text multimodal generation, Helium is a
+pure text transformer model optimized for text completion and generation.
+
+Features:
+- Supports quantization (4-bit and 8-bit) for reduced memory usage
+- Can save quantized weights for later use
+- Uses SentencePiece tokenization
+
+Usage:
+------
+    python -m moshi_mlx.run_helium --prompt "Once upon a time"
+    python -m moshi_mlx.run_helium --quantize-bits 8 --prompt "Hello world"
+"""
+
 import argparse
 import sentencepiece
 import huggingface_hub
@@ -11,6 +33,31 @@ from moshi_mlx import models, utils
 
 
 def main():
+    """
+    Main entry point for Helium text generation.
+    
+    Loads the Helium language model, optionally applies quantization,
+    and generates text based on the provided prompt using autoregressive
+    sampling.
+    
+    The generation loop:
+    1. Tokenizes the input prompt
+    2. Feeds tokens through the model
+    3. Samples the next token from the output distribution
+    4. Decodes and prints the generated token
+    5. Repeats until max steps reached
+    
+    Command-line Arguments:
+        --tokenizer: Path to the SentencePiece tokenizer file
+        --weights: Path to the model weights file
+        --nsteps: Number of generation steps (default: 20)
+        --hf-repo: HuggingFace repository for model files
+        --prompt: Input text prompt for generation
+        --verbose: Print detailed step-by-step output
+        --quantize-bits: Apply quantization (4 or 8 bits)
+        --save-quantized: Save quantized weights to file
+        --quantize-group-size: Group size for quantization (default: 64)
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--tokenizer", type=str)
     parser.add_argument("--weights", type=str)
