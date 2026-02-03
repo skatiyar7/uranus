@@ -113,60 +113,91 @@ The following diagram shows the flow of audio data during a real-time streaming 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                        STREAMING SESSION FLOW                                │
+│                                                                              │
+│  Entry Point: local_web.main() spawns two processes via multiprocessing     │
 └─────────────────────────────────────────────────────────────────────────────┘
 
     Browser/Client                Web Server Process              Model Server Process
     ══════════════                ══════════════════              ════════════════════
+                                  local_web.web_server()          local_web.model_server()
           │                              │                               │
           │  1. WebSocket Connect        │                               │
-          │─────────────────────────────►│                               │
+          │─────────────────────────────►│ handle_chat()                 │
           │                              │                               │
           │  2. Handshake (0x00)         │                               │
           │◄─────────────────────────────│                               │
           │                              │                               │
-          │                              │                               │
     ┌─────┴─────┐                  ┌─────┴─────┐                   ┌─────┴─────┐
-    │  AUDIO    │                  │   AUDIO   │                   │   MODEL   │
-    │  INPUT    │                  │  PIPELINE │                   │ INFERENCE │
+    │  AUDIO    │                  │   ASYNC   │                   │   MODEL   │
+    │  INPUT    │                  │   LOOPS   │                   │ INFERENCE │
     │  LOOP     │                  │           │                   │   LOOP    │
     └─────┬─────┘                  └─────┬─────┘                   └─────┬─────┘
           │                              │                               │
-          │                              │                               │
+          │                        ┌─────┴─────┐                         │
+          │                        │ 4 async   │                         │
+          │                        │ coroutines│                         │
+          │                        └─────┬─────┘                         │
           ▼                              ▼                               ▼
 ┌─────────────────┐            ┌─────────────────┐             ┌─────────────────┐
-│ 3. Capture Mic  │            │ 4. Opus Decode  │             │                 │
-│    Audio        │───────────►│    to PCM       │             │                 │
-│    (Opus)       │  0x01+data │    (24kHz)      │             │                 │
-└─────────────────┘            └────────┬────────┘             │                 │
-                                        │                      │                 │
+│ 3. Capture Mic  │            │ handle_chat.    │             │                 │
+│    Audio        │───────────►│   recv_loop()   │             │                 │
+│    (Opus)       │  0x01+data │ Opus→PCM decode │             │                 │
+└─────────────────┘            │ sphn.OpusStream │             │                 │
+                               │   Reader        │             │                 │
+                               └────────┬────────┘             │                 │
+                                        │ input_queue          │                 │
                                         ▼                      │                 │
                                ┌─────────────────┐             │                 │
-                               │ 5. Mimi Encode  │             │                 │
-                               │    PCM → Tokens │             │                 │
-                               │    (1920 samples│             │                 │
-                               │     = 80ms)     │             │                 │
+                               │ send_loop()     │             │                 │
+                               │ rustymimi.      │             │                 │
+                               │ StreamTokenizer │             │                 │
+                               │   .encode()     │             │                 │
                                └────────┬────────┘             │                 │
                                         │                      │                 │
-                                        │  Audio Tokens        │                 │
-                                        │  via Queue           │                 │
-                                        │─────────────────────►│ 6. LmGen.step() │
-                                        │                      │    Generate     │
-                                        │                      │    text + audio │
-                                        │                      │    tokens       │
+                               ┌────────┴────────┐             │                 │
+                               │ send_loop2()    │             │                 │
+                               │ .get_encoded()  │             │                 │
+                               │ → Queue put     │             │                 │
+                               └────────┬────────┘             │                 │
+                                        │                      │                 │
+                                        │  client_to_server    │                 │
+                                        │  (mp.Queue)          │                 │
+                                        │─────────────────────►│ Main Loop:      │
+                                        │                      │ gen.step()      │
+                                        │                      │ (LmGen.step)    │
+                                        │                      │   ↓             │
+                                        │                      │ Lm._sample()    │
+                                        │                      │   ↓             │
+                                        │                      │ DepFormer.      │
+                                        │                      │   sample()      │
+                                        │                      │   ↓             │
+                                        │                      │ gen.last_audio  │
+                                        │                      │   _tokens()     │
                                         │                      └────────┬────────┘
                                         │                               │
-                                        │  Generated Tokens             │
-                                        │  (text + audio)               │
+                                        │  server_to_client             │
+                                        │  (mp.Queue)                   │
                                         │◄──────────────────────────────│
-                                        │                               │
                                ┌────────┴────────┐                      │
-                               │ 7. Mimi Decode  │                      │
-                               │    Tokens → PCM │                      │
+                               │ recv_loop2()    │                      │
+                               │ Queue get →     │                      │
+                               │ kind=0: audio   │                      │
+                               │ kind=1: text    │                      │
                                └────────┬────────┘                      │
                                         │                               │
                                ┌────────┴────────┐                      │
-                               │ 8. Opus Encode  │                      │
-                               │    PCM → Opus   │                      │
+                               │ recv_loop()     │                      │
+                               │ rustymimi.      │                      │
+                               │ StreamTokenizer │                      │
+                               │   .decode()     │                      │
+                               │ .get_decoded()  │                      │
+                               └────────┬────────┘                      │
+                                        │ output_queue                  │
+                               ┌────────┴────────┐                      │
+                               │ handle_chat.    │                      │
+                               │   send_loop()   │                      │
+                               │ sphn.OpusStream │                      │
+                               │   Writer        │                      │
                                └────────┬────────┘                      │
                                         │                               │
           ┌─────────────────────────────┘                               │
@@ -179,6 +210,56 @@ The following diagram shows the flow of audio data during a real-time streaming 
           │                                                             │
           │         (Loop continues for duration of session)            │
           └─────────────────────────────────────────────────────────────┘
+
+
+## Function Entry Points Reference
+
+### local_web.py - Web Server Module
+
+| Function | Line | Description |
+|----------|------|-------------|
+| [`main()`](../local_web.py#L756) | L756 | Entry point, spawns web_server and model_server processes |
+| [`web_server()`](../local_web.py#L412) | L412 | Handles WebSocket connections, audio encoding/decoding |
+| [`model_server()`](../local_web.py#L270) | L270 | Runs language model inference loop |
+| [`full_warmup()`](../local_web.py#L168) | L168 | Initializes audio tokenizer pipeline |
+
+**web_server internal async functions:**
+- `send_loop()` - PCM → `audio_tokenizer.encode()`
+- `send_loop2()` - `get_encoded()` → `client_to_server.put()`
+- `recv_loop()` - `get_decoded()` → `output_queue`
+- `recv_loop2()` - `server_to_client.get()` → `decode()`
+- `handle_chat()` - WebSocket handler with nested `recv_loop()` and `send_loop()`
+
+### models/generate.py - Generation Wrapper
+
+| Class/Method | Line | Description |
+|--------------|------|-------------|
+| [`class LmGen`](models/generate.py#L45) | L45 | Generation state manager for delayed streams |
+| [`LmGen.step()`](models/generate.py#L277) | L277 | Main generation step, returns text tokens |
+| [`LmGen._step()`](models/generate.py#L160) | L160 | Internal step with full return values |
+| [`LmGen.last_audio_tokens()`](models/generate.py#L328) | L328 | Get most recent completed audio tokens |
+
+### models/lm.py - Language Model
+
+| Class/Method | Line | Description |
+|--------------|------|-------------|
+| [`class Lm`](models/lm.py#L444) | L444 | Main language model (transformer + depformer) |
+| [`Lm._sample()`](models/lm.py#L636) | L636 | Core sampling: text_emb → transformer → depformer |
+| [`Lm.sample()`](models/lm.py#L684) | L684 | Public wrapper around `_sample()` |
+| [`class DepFormer`](models/lm.py#L357) | L357 | Dependent transformer for audio generation |
+| [`DepFormer.sample()`](models/lm.py#L395) | L395 | Autoregressively sample all audio codebooks |
+
+### models/mimi.py - Audio Codec
+
+| Class/Method | Line | Description |
+|--------------|------|-------------|
+| [`class Mimi`](models/mimi.py#L151) | L151 | Neural audio codec (MLX implementation) |
+| [`Mimi.encode()`](models/mimi.py#L232) | L232 | Batch encode: PCM → tokens |
+| [`Mimi.decode()`](models/mimi.py#L253) | L253 | Batch decode: tokens → PCM |
+| [`Mimi.encode_step()`](models/mimi.py#L274) | L274 | Streaming encode (maintains state) |
+| [`Mimi.decode_step()`](models/mimi.py#L293) | L293 | Streaming decode (maintains state) |
+
+**Note:** For streaming in `local_web.py`, the Rust-based `rustymimi.StreamTokenizer` is used instead of the MLX `Mimi` class for better performance.
 
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
