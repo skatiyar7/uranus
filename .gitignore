@@ -9,7 +9,11 @@ __pycache__/
 # Kiro
 *.kiro
 
-# Distribution / packaging
+# VsCode - include shared configs, ignore personal settings
+.vscode/*
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/tasks.json
 .Python
 build/
 develop-eggs/
@@ -165,8 +169,7 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# VsCode
-.vscode/
+# Distribution / packaging
 
 *~
 *.safetensors
