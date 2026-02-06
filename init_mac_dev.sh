@@ -113,6 +113,10 @@ else
     INSTALL_TYPE="PyPI"
 fi
 
+# Install debugpy for debugging support
+echo "🐛 Installing debugpy for debugging support..."
+pip install debugpy
+
 # Verify installation
 echo "🧪 Verifying installation..."
 python -c "import moshi_mlx; print('✅ moshi_mlx installed successfully')"

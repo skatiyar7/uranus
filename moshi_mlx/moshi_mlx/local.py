@@ -184,6 +184,14 @@ def server(printer_q, client_to_server, server_to_client, args):
         server_to_client: Queue sending generated tokens to the client
         args: Command-line arguments with model paths and settings
     """
+    # Debug mode setup
+    if args.debug_model:
+        import debugpy
+        debugpy.listen(("0.0.0.0", 5678))
+        printer_q.put_nowait((PrinterType.INFO, "[SERVER] Debugger listening on port 5678. Waiting for client..."))
+        debugpy.wait_for_client()
+        printer_q.put_nowait((PrinterType.INFO, "[SERVER] Debugger attached!"))
+
     model_file = args.moshi_weight
     tokenizer_file = args.tokenizer
     if model_file is None:
@@ -412,6 +420,11 @@ def main():
     parser.add_argument("-q", "--quantized", type=int, choices=[4, 8])
     parser.add_argument("--steps", default=4000, type=int)
     parser.add_argument("--hf-repo", type=str, default=None)
+    parser.add_argument(
+        "--debug-model",
+        action="store_true",
+        help="Enable debugpy for model server process (attach on port 5678)",
+    )
 
     args = parser.parse_args()
 

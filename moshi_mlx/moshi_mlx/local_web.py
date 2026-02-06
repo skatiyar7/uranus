@@ -292,60 +292,111 @@ def model_server(client_to_server, server_to_client, lm_config, args):
         server_to_client: Queue sending generated tokens to the web server
         lm_config: Language model configuration (dict or LmConfig)
         args: Command-line arguments with model paths and settings
+    
+    Returns:
+        None: This function runs indefinitely until interrupted
+        
+    Raises:
+        ValueError: If an invalid quantization value is provided
+        KeyboardInterrupt: When the process is terminated by user signal
+        
+    Note:
+        This function is designed to run in a separate process and communicates
+        with the web server process through multiprocessing queues. It handles
+        the core AI inference workload while the web server manages network I/O.
     """
+    # =========================================================================
+    # Debug Mode Setup
+    # =========================================================================
+    if args.debug_model:
+        import debugpy
+        debugpy.listen(("0.0.0.0", 5678))
+        log("info", "[SERVER] Debugger listening on port 5678. Waiting for client...")
+        debugpy.wait_for_client()
+        log("info", "[SERVER] Debugger attached!")
+
     # =========================================================================
     # Model and Tokenizer Loading
     # =========================================================================
+    # This section handles the initialization of the AI model and text tokenizer.
+    # It supports multiple model formats (full precision, 4-bit, 8-bit quantized)
+    # and can automatically download models from HuggingFace Hub.
     
     # Resolve model weights file path
+    # Priority order: command line args > config file > auto-selection based on quantization
     model_file = args.moshi_weight
     tokenizer_file = args.tokenizer
+    
+    # Auto-select appropriate model file if not explicitly provided
     if model_file is None:
-        # Auto-select model file based on config or quantization setting
+        # Check if model name is specified in config
         if type(lm_config) is dict and "moshi_name" in lm_config:
             model_file = hf_hub_download(args.hf_repo, lm_config["moshi_name"])
+        # Select quantized model based on command line flag
         elif args.quantized == 8:
             model_file = hf_hub_download(args.hf_repo, "model.q8.safetensors")
         elif args.quantized == 4:
             model_file = hf_hub_download(args.hf_repo, "model.q4.safetensors")
         elif args.quantized is not None:
+            # Invalid quantization value provided
             raise ValueError(f"Invalid quantized value: {args.quantized}")
         else:
+            # Default to full precision model
             model_file = hf_hub_download(args.hf_repo, "model.safetensors")
+    
+    # Resolve local path (handles both local files and hf:// URLs)
     model_file = hf_get(model_file)
     
-    # Resolve tokenizer file path
+    # Resolve tokenizer file path with similar logic
     if tokenizer_file is None:
         if type(lm_config) is dict and "tokenizer_name" in lm_config:
             tokenizer_file = hf_hub_download(args.hf_repo, lm_config["tokenizer_name"])
         else:
+            # Default tokenizer for Moshi models
             tokenizer_file = hf_hub_download(args.hf_repo, "tokenizer_spm_32k_3.model")
+    
+    # Convert to local path if it's a remote reference
     tokenizer_file = hf_get(tokenizer_file)
+    
+    # Store generation steps limit from command line args
     steps = args.steps
 
-    # Load the SentencePiece text tokenizer
+    # Load the SentencePiece text tokenizer for converting between text and tokens
+    # SentencePiece is used for subword tokenization, handling spaces with special tokens
     log("info", f"[SERVER] loading text tokenizer {tokenizer_file}")
     text_tokenizer = sentencepiece.SentencePieceProcessor(tokenizer_file)  # type: ignore
     
     # =========================================================================
     # Model Initialization
     # =========================================================================
+    # This section initializes the language model with proper configuration,
+    # applies quantization for efficiency, and loads the trained weights.
     
-    # Set random seed for reproducibility
+    # Set random seed for reproducibility - ensures consistent behavior across runs
+    # Using a fixed seed (299792458) for deterministic results
     mx.random.seed(299792458)
     
-    # Create model from config
+    # Create model from config - convert dict config to LmConfig object if needed
+    # The config defines model architecture parameters like layer count, hidden size, etc.
     if type(lm_config) is dict:
         lm_config = models.LmConfig.from_config_dict(lm_config)
+    
+    # Instantiate the language model with the specified configuration
     model = models.Lm(lm_config)
+    
+    # Set model precision to bfloat16 (brain floating point 16-bit)
+    # This provides a good balance between precision and memory usage
     model.set_dtype(mx.bfloat16)
     
-    # Apply quantization if requested (reduces memory and increases speed)
+    # Apply quantization if requested - significantly reduces memory footprint and increases inference speed
+    # 4-bit quantization uses group_size=32, 8-bit uses group_size=64
+    # Quantization converts weights from floating point to lower precision integers
     if args.quantized is not None:
         group_size = 32 if args.quantized == 4 else 64
         nn.quantize(model, bits=args.quantized, group_size=group_size)
 
-    # Load model weights
+    # Load the pre-trained model weights from the specified file
+    # strict=True ensures all weights in the file are loaded and no extra weights are expected
     log("info", f"[SERVER] loading weights {model_file}")
     model.load_weights(model_file, strict=True)
     log("info", "[SERVER] weights loaded")
@@ -353,59 +404,85 @@ def model_server(client_to_server, server_to_client, lm_config, args):
     # =========================================================================
     # Conditioning Setup
     # =========================================================================
+    # Configure model conditioning for quality control and prepare for inference.
+    # Conditioning tensors guide the model to produce higher quality outputs.
     
-    # Get condition tensor for quality control (if model supports it)
+    # Get condition tensor for quality control (if model supports conditioning)
+    # The condition tensor provides guidance to the model for generating high-quality outputs
+    # "very_good" is a predefined quality level that optimizes for natural speech
     if model.condition_provider is not None:
         ct = model.condition_provider.condition_tensor("description", "very_good")
     else:
+        # Model doesn't support conditioning - use None
         ct = None
 
-    # Warmup the model (compiles kernels, allocates memory)
+    # Warmup the model - this is a crucial step that:
+    # 1. Compiles MLX kernels for the specific model architecture
+    # 2. Allocates memory for model parameters and intermediate computations
+    # 3. Initializes internal model state
+    # 4. Ensures the model is ready for real-time inference
     log("info", "[SERVER] warming up the model")
     model.warmup(ct)
     log("info", "[SERVER] model warmed up")
     
-    # Create the generation wrapper
+    # Create the generation wrapper that manages the inference process
+    # LmGen handles the autoregressive generation loop and sampling strategies
     gen = models.LmGen(
-        model=model,
-        max_steps=steps + 5,
-        text_sampler=utils.Sampler(),
-        audio_sampler=utils.Sampler(),
-        check=False,
+        model=model,                    # The loaded language model
+        max_steps=steps + 5,            # Maximum generation steps (with buffer)
+        text_sampler=utils.Sampler(),   # Sampling strategy for text tokens
+        audio_sampler=utils.Sampler(),  # Sampling strategy for audio tokens
+        check=False,                   # Disable safety checks for performance
     )
 
     # =========================================================================
     # Main Inference Loop
     # =========================================================================
+    # The core real-time inference loop that processes audio tokens and generates
+    # text and audio responses. This loop runs continuously until interrupted.
     
-    # Signal to the web server that we're ready
+    # Signal to the web server that the model server is ready to receive requests
+    # This handshake ensures proper synchronization between processes
     server_to_client.put("start")
     log("info", "[SERVER] connected!")
     
     try:
+        # Main processing loop - runs indefinitely for real-time conversation
         while True:
-            # Receive audio tokens from the client
+            # Receive audio tokens from the client (web server process)
+            # These tokens represent the user's spoken input encoded by Mimi
             data = client_to_server.get()
             
-            # Reshape tokens: [codebooks, 1] -> [1, main_codebooks]
+            # Reshape tokens from [codebooks, 1] to [1, main_codebooks]
+            # This prepares the data for the model's expected input format
+            # We only use the main codebooks (first N codebooks) for generation
             data = mx.array(data).transpose(1, 0)[:, : gen.main_codebooks]
             
-            # Run one step of generation
+            # Run one step of autoregressive generation
+            # The model processes the input tokens and generates the next text/audio tokens
+            # ct (condition tensor) guides the generation for quality
             text_token = gen.step(data, ct=ct)
-            text_token = text_token[0].item()
-            audio_tokens = gen.last_audio_tokens()
+            text_token = text_token[0].item()  # Extract scalar value
+            audio_tokens = gen.last_audio_tokens()  # Get generated audio tokens
             
-            # Send text token if it's not padding (0) or end-of-sequence (3)
+            # Send text token if it's meaningful (not padding or end-of-sequence)
+            # Padding token (0) and EOS token (3) are filtered out
             if text_token not in (0, 3):
+                # Convert token ID to text piece using the tokenizer
                 _text = text_tokenizer.id_to_piece(text_token)  # type: ignore
-                _text = _text.replace("▁", " ")  # SentencePiece uses ▁ for spaces
+                # Replace SentencePiece's special space character (▁) with regular space
+                _text = _text.replace("▁", " ")
+                # Send text response to client with kind=1
                 server_to_client.put_nowait((1, _text))
             
-            # Send audio tokens if available
+            # Send audio tokens if available (generated speech)
             if audio_tokens is not None:
+                # Convert to numpy array with uint32 precision for efficient transfer
                 audio_tokens = np.array(audio_tokens).astype(np.uint32)
+                # Send audio tokens to client with kind=0
                 server_to_client.put_nowait((0, audio_tokens))
     except KeyboardInterrupt:
+        # Gracefully exit on Ctrl+C or process termination
         pass
 
 
@@ -805,6 +882,11 @@ def main():
         ),
     )
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument(
+        "--debug-model",
+        action="store_true",
+        help="Enable debugpy for model_server process (attach on port 5678)",
+    )
 
     args = parser.parse_args()
     

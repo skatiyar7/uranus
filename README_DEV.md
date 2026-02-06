@@ -92,7 +92,61 @@ moshi/
 - **Memory**: 16GB+ RAM
 - **Storage**: ~4GB for models (downloaded on first run)
 
-## 🐛 Troubleshooting
+## 🐛 Debugging
+
+Both `moshi-local` and `moshi-local-web` support debugging the model server process via debugpy.
+
+### Prerequisites
+```bash
+pip install debugpy
+```
+
+### Start with Debug Mode
+```bash
+# CLI interface
+moshi-local -q 4 --debug-model
+
+# Web interface
+moshi-local-web -q 4 --debug-model
+```
+
+The server will pause and display:
+```
+[Info] [SERVER] Debugger listening on port 5678. Waiting for client...
+```
+
+### Attach Debugger (VS Code / Kiro)
+
+1. Create `.vscode/launch.json`:
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Attach to model_server",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": {
+        "host": "localhost",
+        "port": 5678
+      },
+      "justMyCode": false
+    }
+  ]
+}
+```
+
+2. Open Run and Debug panel (⇧⌘D)
+3. Select "Attach to model_server" and click play (F5)
+
+Once attached, you'll see:
+```
+[Info] [SERVER] Debugger attached!
+```
+
+Set breakpoints in `moshi_mlx/moshi_mlx/local_web.py` or `local.py` (in the `model_server`/`server` functions) and they'll be hit during execution.
+
+## 🔧 Troubleshooting
 
 ### Common Issues
 
